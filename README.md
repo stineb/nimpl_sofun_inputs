@@ -2,13 +2,13 @@
 ## Statistical models for carbon allocation and N cycle
 ### Author: Yunke Peng
 
-###### The data has provided a global dataset of carbon allocations (at different compartments), plant functional traits, soil traits and climate variables. It includes 672 samples, 200 sites overall.
+###### The data has provided a global dataset of carbon allocations (at different compartments), plant functional traits, soil traits and climate variables. It includes 672 samples, 200 sites overall..
 
 ###### The original reference of dataset included: 
 * Terra A-P project database (organized by Dr. Sara Vicca and updated by Dr. Keith Bloomfield; non-public)
 * Malhi et al. 2011 Phil. Trans. R. Soc. B. (public available)
 * Malhi et al. 2017 New Phytologist (public available)
-* ForC dataset -  https://github.com/forc-db/ForC (public available)
+* ForC dataset -  https://github.com/forc-db/ForC (public available).
 
 ###### Pre-processing: In NPP/GPP analysis, there was one sample (see site: TRU08) indicating higher TNPP_1 (total NPP) than GPP, which is not reasonable. This sample was therefore considered as NA in this analysis. 
 

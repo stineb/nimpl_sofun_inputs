@@ -1,0 +1,348 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+---
+title: "Prediction field of LMA"
+author: "Yunke Peng"
+date: "Nov 11 2020"
+output: html_document
+---
+
+## Introduction about Global nc files
+
+Here LMA was done separately, because (1) pre-processing of TRY maps takes a long time, whcih requires the step to resample data from TRY map to 0.5 grids, (2) knn method also takes a long time, and it necessarily needs global predictors from PPFD, Tg and alpha, therefore this file is better to be done separately.
+
+A brief information about LMA, and three main predictors that will be used in knn.
+ * alpha (SPLASH: asssited by David Sandoval)
+ * PPFD (umol/m2/s) (WFDEI: http://www.eu-watch.org/gfx_content/documents/README-WFDEI%20(v2016).pdf)
+ * Tg (degree celcius) (CRU ts 4.01: https://crudata.uea.ac.uk/cru/data/hrg/cru_ts_4.01/)
+ * LMA (g/m2) (TRY Global traits map 3km: https://isp.uv.es/code/try.html)
+
+alpha, PPFD, Tg will directly use 0.5 * 0.5 grids data from final_ncfile/
+
+1. Pre-processing of LMA, including resample TRY traits map.
+```{r}
+
+library(rbeni)
+library(raster)
+
+#1. Input 0.5 resolution df, and convert to raster before resampling (e.g. elevation.nc)
+elev_nc <- read_nc_onefile("~/data/watch_wfdei/WFDEI-elevation.nc")
+elev <- as.data.frame(nc_to_df(elev_nc, varnam = "elevation"))
+summary(elev)
+names(elev) <- c("lon","lat","z")
+coordinates(elev) <- ~lon+lat 
+gridded(elev) <- TRUE
+raster_z <- raster(elev, "z") 
+
+bounding_box <- extent(-180, 180, -90, 90)
+raster_z_crop <- crop(raster_z, bounding_box)
+raster_z_crop
+
+#2. Input 3km LMA raster that needs resampled
+#Original data source: https://isp.uv.es/code/try.html
+raster_SLA <- raster("~/data/TRY_maps/data_orig/SLA_3km_v1.tif")
+raster_SLA_crop <- crop(raster_SLA, bounding_box)
+raster_SLA_crop
+
+#raster of SLA (0.02694946* 0.02694946) will be resampled to 0.5*0.5 resolution, based on provided elevation raster 
+res(raster_z_crop)
+res(raster_SLA_crop)
+
+resampled_SLA <- raster::resample(raster_SLA_crop, raster_z_crop, method="ngb")
+df_SLA <- stack(resampled_SLA)
+df_SLA <- as.data.frame(df_SLA,xy = TRUE)
+names(df_SLA) <- c("lon","lat","SLA")
+summary(df_SLA)
+
+df_SLA2 <- subset(df_SLA,(SLA > 0 & SLA < 1000)) # remove some amazingly wrong number (negative or too high!)
+df_SLA2$LMA <- 1000/df_SLA2$SLA #mm2/mg -> g/m2
+LMA_df <- df_SLA2[,c("lon","lat","LMA")]  
+
+``` 
+
+
+2. knn method, using Tg, PPFD, alpha and lat to fill empty areas in LMA map, as shown above
+```{r}
+library(raster)
+library(ncdf4)
+library(dplyr)      # for data wrangling
+library(ggplot2)    # for awesome graphics
+library(rsample)    # for creating validation splits
+library(recipes)    # for feature engineering
+# Modeling packages
+library(caret)       # for fitting KNN models
+library(h2o)       # for resampling and model training
+library(AmesHousing)
+library(modeldata)
+library(rsample)
+library(dslabs)
+library(purrr)
+library(randomForest)
+library(rbeni)
+
+# recap
+summary(LMA_df)
+dim(LMA_df)
+
+#Map after resamping
+plot_map3(LMA_df, 
+          varnam = "LMA",plot_title = " LMA (g m-2)",
+          latmin = -65, latmax = 85)
+
+#We start our work from here - using knn method to fill our grids
+
+#(1) first, input Tg, PPFD, alpha directly from final_nc/ (the data directly used in nimpl simulation)
+# NA value was converted to 9999 in previous step (to prevent FPE in nimpl), therefore, converting it back
+Tg_df <- nc_to_df(read_nc_onefile("~/data/nimpl_sofun_inputs/map/Final_ncfile/Tg.nc"), varnam = "Tg")
+#Tg_df$myvar[Tg_df$myvar == 9999] <- NA
+names(Tg_df) <- c("lon","lat","Tg")
+
+PPFD_df <- nc_to_df(read_nc_onefile("~/data/nimpl_sofun_inputs/map/Final_ncfile/PPFD.nc"), varnam = "PPFD")
+#PPFD_df$myvar[PPFD_df$myvar == 9999] <- NA
+names(PPFD_df) <- c("lon","lat","PPFD")
+
+alpha_df <- nc_to_df(read_nc_onefile("~/data/nimpl_sofun_inputs/map/Final_ncfile/alpha.nc"), varnam = "alpha")
+#alpha_df$myvar[alpha_df$myvar == 9999] <- NA
+names(alpha_df) <- c("lon","lat","alpha")
+
+merge1 <-Reduce(function(x,y) merge(x = x, y = y, by = c("lon","lat"),all.x=TRUE), 
+                list(Tg_df,PPFD_df,alpha_df,LMA_df))
+summary(merge1) # we will start knn from here, it is clear that LMA has less data, and this is what we aim to interpolate based on knn
+
+merge2 <- subset(merge1,PPFD>0) # only select available grids (in land). This will be furtherly used to determine training and testing (predicted) data.
+dim(merge2)
+
+#(2) start knn
+
+all_data <- merge2[,c("LMA","lat","Tg","alpha","PPFD")] # this is final input will be used in knn, which removed lon here.
+
+training_data <- subset(all_data,LMA>0) #only select available LMA data as training data
+
+testing_data <- subset(all_data,is.na(LMA)==TRUE)  #only select NA-LMA data as testing data, which will be used in knn at the end.
+
+dim(training_data)
+dim(testing_data)
+
+# we will use those 19020 grids to predict those 44816 grids
+
+# 3. knn training
+cv <- trainControl(
+  method = "cv", 
+  number = 10
+)
+
+# Create a hyperparameter grid search
+hyper_grid <- expand.grid(
+  k = floor(seq(5, 20, length.out = 15))
+)
+
+knn_fit <- train(LMA ~., data = training_data,
+                 method = "knn",
+                 trControl=cv,
+                 preProcess = c("center", "scale"),
+                 tuneGrid = hyper_grid)
+
+knn_fit # it indicated k =9 as the best design, with R2=0.61, RMSE = 10.58
+
+# output prediction data and add it in testing_data
+test_pred <- predict(knn_fit,newdata=testing_data)
+testing_data$LMA <- test_pred
+
+#rbind, and merge back with lon.
+final <- rbind(training_data,testing_data)
+
+lon_data <- merge2[,c("lon","lat","Tg","alpha","PPFD")]
+
+final2 <-Reduce(function(x,y) merge(x = x, y = y, by = c("lat","Tg","alpha","PPFD"),all.x=TRUE), 
+                list(final,lon_data))
+
+#form final3 dataframe as final output, and plot
+LMA_knn_df <- final2[,c("lon","lat","LMA")]
+
+#This map is LMA after knn method
+plot_map3(LMA_knn_df, 
+          varnam = "LMA",plot_title = " LMA (g m-2)",
+          latmin = -65, latmax = 85)
+
+#Finally, ready to be outputted! It merges from 63836 grids to 259200 cells, which makes it as a perfect standard for nimpl input
+LMA_knn_df2 <-Reduce(function(x,y) merge(x = x, y = y, by = c("lon","lat"),all.x=TRUE), 
+                list(merge1[,c("lon","lat")],LMA_knn_df))
+
+summary(LMA_knn_df2)
+df_LMA <- LMA_knn_df2[order(LMA_knn_df2[,2],LMA_knn_df2[,1]),]
+
+#prepare lon and lat
+ncin <- nc_open("~/data/watch_wfdei/WFDEI-elevation.nc")
+lon <- ncvar_get(ncin,"lon")
+lat<-ncvar_get(ncin,"lat")
+
+#output nc file - In Euler its path is same: "~/data/nimpl_sofun_inputs/map/Final_ncfile"
+LMA_nc <- list(df_to_grid(df_LMA,varnam = "LMA", lonnam = "lon", latnam = "lat"))
+names(LMA_nc) <- "LMA"
+varams = "LMA"
+test <- list(lon,lat,LMA_nc,varams)
+names(test) <- c("lon","lat","vars","varams")
+write_nc2(test,varnams = "LMA",long_name = "Leaf mass per area",units = "g m-2",
+          path = "~/data/nimpl_sofun_inputs/map/Final_ncfile/LMA.nc")
+
+``` 
+
+3. test map's LMA data comparing with obs. LMA data
+```{r}
+
+#3. This is not the end! Let's check how LMA from map closed to obs. LMA
+#We will try both version, one is LMA from orginal data (before knn), another is final data (after knn and exactly the one used for )
+dim(LMA_df) # org. data has less grids, as we all know!
+dim(LMA_knn_df)
+
+library(spgwr)
+
+#Now, input a large global dataset of LMA individuals data
+SP_input <- read.csv(file="~/data/CN_leaf/final_individuals.csv") #all individuals
+SP_input2 <- SP_input[,c("lat","lon","Elevation","lma")]
+sitemean <- aggregate(SP_input2,by=list(SP_input2$lon,SP_input2$lat), FUN=mean, na.rm=TRUE) #site-mean
+leafcn_site <- sitemean[,c("lon","lat","Elevation","lma")]
+names(leafcn_site) <- c("lon","lat","z","lma")
+
+
+#start interpolating sites
+###using direct method - based on original data (before knn)
+leafcn_global <- na.omit(LMA_df)
+coordinates(leafcn_global) <- ~lon+lat 
+gridded(leafcn_global) <- TRUE
+rleafcn_global <- raster(leafcn_global, "LMA") 
+sp_sites <- SpatialPoints(leafcn_site[,c("lon","lat","z")]) # only select lon and lat
+
+leafcn_pred_direct <- raster::extract(rleafcn_global, sp_sites, sp = TRUE) %>% as_tibble() %>% 
+  right_join(leafcn_site, by = c("lon", "lat","z")) %>% 
+  dplyr::rename( TRY_lma = LMA)
+
+leafcn_pred_direct <- as.data.frame(leafcn_pred_direct)
+head(leafcn_pred_direct)
+
+#using direct method
+analyse_modobs2(leafcn_pred_direct,"TRY_lma","lma", type = "points")
+
+
+###using direct method - based on final data (after knn)
+leafcn_global <- na.omit(LMA_knn_df)
+coordinates(leafcn_global) <- ~lon+lat 
+gridded(leafcn_global) <- TRUE
+rleafcn_global <- raster(leafcn_global, "LMA") 
+sp_sites <- SpatialPoints(leafcn_site[,c("lon","lat","z")]) # only select lon and lat
+
+leafcn_pred_direct <- raster::extract(rleafcn_global, sp_sites, sp = TRUE) %>% as_tibble() %>% 
+  right_join(leafcn_site, by = c("lon", "lat","z")) %>% 
+  dplyr::rename( TRY_lma = LMA)
+
+leafcn_pred_direct <- as.data.frame(leafcn_pred_direct)
+head(leafcn_pred_direct)
+
+#using direct method
+analyse_modobs2(leafcn_pred_direct,"TRY_lma","lma", type = "points")
+
+#The comparsion between map's extracterd site LMA and obs. LMA is amazingly poor! That's probably why we fit poor performance in leaf c/n prediciton in nimpl simulation
+
+
+```
+
+
+4. Add site PPFD and Tg into model, to see if it helps to predict better
+```{r}
+
+dim(leafcn_pred_direct)
+merge3 <- merge2[,c("lon","lat","Tg","PPFD","alpha")]
+elev_nc <- read_nc_onefile("~/data/watch_wfdei/WFDEI-elevation.nc")
+elev <- as.data.frame(nc_to_df(elev_nc, varnam = "elevation"))
+names(elev) <- c("lon","lat","z")
+
+all_global <-as.data.frame(Reduce(function(x,y) merge(x = x, y = y, by = c("lon","lat"),all.x=TRUE), 
+                list(elev,merge3)))
+
+leafcn_pred_direct <- leafcn_pred_direct[,c("lon","lat","z","lma","TRY_lma")]
+
+a <- 1.5
+
+#interpolating Tg and PPFD
+for (i in c(1:nrow(leafcn_pred_direct))){
+  gpp_global <- na.omit(all_global)
+  gpp_part <- subset(gpp_global,lon>(leafcn_pred_direct[i,1]-a)&lon<(leafcn_pred_direct[i,1]+a)&
+                       lat>(leafcn_pred_direct[i,2]-a)&lat<(leafcn_pred_direct[i,2]+a))
+  coordinates(gpp_part) <- c("lon","lat")
+  gridded(gpp_part) <- TRUE
+  
+  gpp_coord <- leafcn_pred_direct[i,1:3]
+  coordinates(gpp_coord) <- c("lon","lat")
+  leafcn_pred_direct$Tg[i] <- (gwr(Tg ~ z, gpp_part, bandwidth = 1.06, fit.points =gpp_coord,predictions=TRUE))$SDF$pred
+  leafcn_pred_direct$PPFD[i] <- (gwr(PPFD ~ z, gpp_part, bandwidth = 1.06, fit.points =gpp_coord,predictions=TRUE))$SDF$pred
+}
+
+#newly include narea and vcmax25
+
+SP_input <- read.csv(file="~/data/CN_leaf/final_individuals.csv") #all individuals
+SP_input2 <- SP_input[,c("lat","lon","Elevation","narea","Vcmax.25")]
+sitemean2 <- aggregate(SP_input2,by=list(SP_input2$lon,SP_input2$lat), FUN=mean, na.rm=TRUE) #site-mean
+sitemean2 <- sitemean2[,c("lon","lat","Elevation","narea","Vcmax.25")]
+names(sitemean2) <- c("lon","lat","z","narea","Vcmax.25")
+
+final <-as.data.frame(Reduce(function(x,y) merge(x = x, y = y, by = c("lon","lat","z"),all.x=TRUE), 
+                list(leafcn_pred_direct,sitemean2)))
+summary(final)
+
+final$nmass <- final$narea/final$lma
+
+#2 models to be considered now
+summary(lm(nmass ~ Tg + PPFD + lma , data = final))
+
+coef(lm(nmass ~ Tg + PPFD + lma , data = final))
+
+
+final$vcmax25_lma <- final$Vcmax.25/final$lma
+
+summary(lm(nmass ~ vcmax25_lma, data = final))
+
+dim(final)
+
+#3. lastly,considering add soil C/N into statistical model. That is, Nmass ~ Vcmax25/lma
+library(raster)
+library(rgdal)
+library(dplyr)
+library(rbeni)
+library(ncdf4)
+soil <- raster('~/data/ISRIC/data_orig/data/raster/w001000.adf')
+NRE_lonlat <- final[,c("lon","lat","z")]
+
+sp_sites <- SpatialPoints(NRE_lonlat[,c("lon","lat","z")]) # only select lon and lat
+
+#change its variable name to SUID, this is a unique code that could be used to merged with soil data, which will be further merged with csv below.
+NRE_lonlat2 <- raster::extract(soil, sp_sites, sp = TRUE) %>% as_tibble() %>% 
+  right_join(NRE_lonlat, by = c("lon", "lat","z")) %>% 
+  dplyr::rename( SUID = w001000)
+
+#input soil information data csv
+ISRIC.data<-read.csv(file="~/data/ISRIC/data_orig/data/HW30s_FULL.csv",header=TRUE,sep=";",dec = ".") # Now, input ISRIC database
+data.soil.extract <- merge(NRE_lonlat2,ISRIC.data,by='SUID',all.x=TRUE) # merge site with soil variables by using SUID
+data.soil.extract2 <- subset(data.soil.extract,CNrt>0) # select available CNrt
+data.soil.extract3 <- data.soil.extract2[,c("lon","lat","z","CNrt")] # only select CNrt variable
+
+# note that in each site there might be more than 1 samples measured, so we should aggregate them which make sures that one grid holds one data only.
+ss1 <- aggregate(data.soil.extract3,by=list(data.soil.extract3$lon,data.soil.extract3$lat,data.soil.extract3$z), FUN=mean, na.rm=TRUE) 
+ss2 <- ss1[,c("lon","lat","z","CNrt")] # now,select lon, lat, z and CNrt only
+
+# finally, merging site-based soil c/n data into our current dataframe
+final_add_CN <-Reduce(function(x,y) merge(x = x, y = y, by = c("lon","lat","z"),all.x=TRUE), 
+                  list(final,ss2))
+
+summary(final_add_CN)
+
+summary(lm(nmass ~ CNrt + vcmax25_lma, data = final_add_CN))
+
+summary(lm(nmass ~ CNrt + Vcmax.25 + lma, data = final_add_CN))
+
+
+```

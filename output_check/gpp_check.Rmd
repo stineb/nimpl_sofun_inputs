@@ -1,0 +1,319 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+---
+title: "Check GPP from sofun/yunkebranch_units (C3 or C3+C4) and compare it with GMD GPP"
+author: "Yunke Peng"
+date: "Sep 28 2020"
+output: html_document
+---
+
+## GPP data description
+
+Here it compares GMD GPP with (1) nimpl GPP for c3 plants only and (2) nimpl GPP for c3 + c4 plants. It shows that (2) has higher R2 (0.93), and many problem sites (GPP = 0) were removed in this data, where it might be because they were at the edge of land, and therefore automatically de-activated when newly including c3/c4 map in nimpl project. We have therefore used the second object (gpp_nimpl_c3c4) as the input in nimpl project.
+
+
+```{r}
+
+library(tidyverse)  # depends
+library(ncmeta)
+library(viridis)
+library(ggthemes)
+library(LSD)
+library(yardstick)
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
+library(gplots)
+library(tidyselect)
+library(extrafont)
+library(rbeni)
+library(raster)
+library(spgwr)
+library(maps)
+library(rworldmap)
+library(cowplot)
+library(ncdf4)
+library(sp)
+
+#######input nimpl/yunkebranch_units gpp (c3 + c4)
+firstyr_data <- 1980 # In data file, which is the first year
+endyr_data <- 2018 # In data file, which is the last year
+location <- "~/data/output/"
+alloutput_list <- list.files(location,full.names = T)
+
+#input elevation nc file, which will be cbind with global df directly
+elev_nc <- read_nc_onefile("~/data/watch_wfdei/WFDEI-elevation.nc")
+#elev_nc <- read_nc_onefile("D:/PhD/nimpl_sofun_inputs/Data/Elevation/WFDEI-elevation.nc")
+elev <- as.data.frame(nc_to_df(elev_nc, varnam = "elevation"))
+head(elev) # this is consistent with df coord below
+
+#Create a function to specify path, loop many years nc file and output a dataframe (lon, lat, var).
+inputnc <- function(name,start_year,end_year){
+  #-----------------------------------------------------------------------
+  # Input: 
+  # name: gpp, npp, anpp, vcmax25, leafcn, nuptake...
+  # start_year: e.g. 1981
+  # end_year: e.g. 2016
+  # location: e.g "D:/PhD/nimpl_sofun_inputs/Data/output/" or in Euler: "~/yunkebranch_units/outputnc/"
+  #-----------------------------------------------------------------------
+  output_allyears <- data.frame(matrix(NA))
+  # first, include all years annual data into a daframe
+  for (i in firstyr_data:endyr_data){
+    if (name == "npp"){
+      nc <- read_nc_onefile(alloutput_list[grepl("a.npp.nc", list.files(location,full.names = T))][i-firstyr_data+1]) #we only rely this to filter npp.nc file...
+    } else {
+      nc <- read_nc_onefile(alloutput_list[grepl(name, list.files(location,full.names = T))][i-firstyr_data+1]) #Input nc
+    }
+    output_year <- nc_to_df(nc, varnam = name)[,3] #Yearly output
+    output_allyears[1:259200,i-firstyr_data+1] <- output_year #here first column represents first year of data file 's output
+  }
+  names(output_allyears) <- paste(name,firstyr_data:endyr_data,sep="")
+  #this variable above (output_allyears), could be end of the function, which is variable at multiple years. But for our purporses, we need mean of select years
+  #then, only calculate means of selected years
+  output_selected_yrs <- rowMeans(output_allyears[,(start_year-firstyr_data+1):(end_year-firstyr_data+1)],na.rm = TRUE) # only calculated means based on selected start and end year (see function)
+  coord <- nc_to_df(nc, varnam = name)[,1:2] # obtain lon and lat
+  final_output <- cbind(coord,elev[,3],output_selected_yrs) # combine lon, lat,z with rowmeans variable
+  names(final_output) <- c("lon","lat","z",name)
+  return(final_output)
+  #-----------------------------------------------------------------------
+  # Output: output_final: the output data (259200 * 3) including lon, lat and value
+  #-----------------------------------------------------------------------
+}
+
+#select data over 30 years, each df includes lon, lat, z, var
+gpp_df <- inputnc("gpp",2000,2011)
+
+
+#######input GMD gpp
+#Data in Euler is from: /cluster/work/climate/bestocke/data/sofun_outputs/output_nc_global/global_FULL_fAPAR3g_v2_2000_2016.a.gpp.nc
+#Data in my desktop is from: /Users/yunpeng/data/gpp_gmd/global_FULL_fAPAR3g_v2_2000_2016.a.gpp.nc
+ncin <- nc_open(paste ("/Users/yunpeng/data/gpp_gmd/global_FULL_fAPAR3g_v2_2000_2016.a.gpp.nc"))
+lon <- ncvar_get(ncin,"lon")
+lat<-ncvar_get(ncin,"lat")
+gpp <- ncvar_get(ncin,"gpp")
+dim(gpp)
+nc_close(ncin)
+pre.vec.long <- as.vector(gpp)
+pre.mat <- matrix(pre.vec.long, nrow = 259200, ncol = 17)
+lonlat <- expand.grid(lon, lat)
+gpp_gmd <- as.data.frame(cbind(lonlat,rowMeans(pre.mat)))
+
+#compare nimpl gpp vs. gmd gpp
+head(gpp_df)
+
+gpp_gmd <- as.data.frame(cbind(gpp_gmd[,1:2],elev[,3],gpp_gmd[,3]))
+names(gpp_gmd) <- c("lon","lat","z","gpp")
+head(gpp_gmd)
+
+gpp_com <- as.data.frame(cbind(gpp_df[,4],gpp_gmd[,4]))
+names(gpp_com) <- c("nimpl_gpp","GMD_gpp")
+
+analyse_modobs2(subset(gpp_com,nimpl_gpp>0),"nimpl_gpp","GMD_gpp", type = "points")
+
+# it shows that nimpl_gpp and GMD_gpp did have very good fitted performance!
+
+###### Now, let's compare its extracted value with obs. gpp separately.
+#First, include GPP data and aggregate to site-mean
+NPP_SaraVicca <- read.csv(file="~/data/NPP_Yunke/NPP_SaraVicca/NPP_SaraVicca.csv")
+NPP_Malhi <- read.csv(file="~/data/NPP_Yunke/NPP_Malhi/NPP_Malhi.csv")
+NPP_Keith <- read.csv(file="~/data/NPP_Yunke/NPP_Keith/NPP_Keith.csv")
+NPP_Forc <- read.csv(file="~/data/NPP_Yunke/NPP_Forc/NPP_Forc.csv")
+NPP_all <- rbind(NPP_SaraVicca,NPP_Malhi,NPP_Keith,NPP_Forc)
+gpp_site <- aggregate(GPP~lon+lat+z,data=NPP_all[,c("lon","lat","z","GPP")],mean,na.rm=TRUE)
+dim(gpp_site)
+
+#1. nimpl gpp
+#1a. gwr
+a <- 1.5
+for (i in c(1:nrow(gpp_site))){
+  gpp_global <- na.omit(gpp_df)
+  gpp_part <- subset(gpp_global,lon>(gpp_site[i,1]-a)&lon<(gpp_site[i,1]+a)&
+                       lat>(gpp_site[i,2]-a)&lat<(gpp_site[i,2]+a))
+  coordinates(gpp_part) <- c("lon","lat")
+  gridded(gpp_part) <- TRUE
+  
+  gpp_coord <- gpp_site[i,1:3]
+  coordinates(gpp_coord) <- c("lon","lat")
+  gpp_site$nimpl_gpp_gwr[i] <- (gwr(gpp ~ z, gpp_part, bandwidth = 1.06, fit.points =gpp_coord,predictions=TRUE))$SDF$pred
+}
+
+#1b. directly method
+#convert nimpl gpp to raster, and then extract site points
+coordinates(gpp_global) <- ~lon+lat 
+gridded(gpp_global) <- TRUE
+rgpp_global <- raster(gpp_global, "gpp") 
+sp_sites <- SpatialPoints(gpp_site[,c("lon","lat","z")]) # only select lon and lat
+
+gpp_site <- extract(rgpp_global, sp_sites, sp = TRUE) %>% as_tibble() %>% 
+  right_join(gpp_site, by = c("lon", "lat","z")) %>% 
+  dplyr::rename( nimpl_gpp_directly = gpp)
+
+gpp_site <- as.data.frame(cbind(gpp_site[,2:6],gpp_site[, 1]))
+
+#2. gmd gpp
+#2a. gwr
+for (i in c(1:nrow(gpp_site))){
+  gpp_global <- na.omit(gpp_gmd)
+  gpp_part <- subset(gpp_global,lon>(gpp_site[i,1]-a)&lon<(gpp_site[i,1]+a)&
+                       lat>(gpp_site[i,2]-a)&lat<(gpp_site[i,2]+a))
+  coordinates(gpp_part) <- c("lon","lat")
+  gridded(gpp_part) <- TRUE
+  
+  gpp_coord <- gpp_site[i,1:3] # select lon, lat, z
+  coordinates(gpp_coord) <- c("lon","lat")
+  gpp_site$gmd_gpp_gwr[i] <- (gwr(gpp ~ z, gpp_part, bandwidth = 1.06, fit.points =gpp_coord,predictions=TRUE))$SDF$pred
+}
+
+#2b.directly method
+coordinates(gpp_global) <- ~lon+lat 
+gridded(gpp_global) <- TRUE
+rgpp_global <- raster(gpp_global, "gpp") 
+sp_sites <- SpatialPoints(gpp_site[,c("lon","lat","z")]) # only select lon and lat
+
+gpp_site <- extract(rgpp_global, sp_sites, sp = TRUE) %>% as_tibble() %>% 
+  right_join(gpp_site, by = c("lon", "lat","z")) %>% 
+  dplyr::rename( gmd_gpp_directly = gpp)
+
+gpp_site <- as.data.frame(cbind(gpp_site[,2:8],gpp_site[, 1]))
+head(gpp_site)
+
+#3. add site forcing data from FLUXNET 
+#Data from Euler: ~/data/stocker20gmd_outputs/rdata_objects/out_eval_FULL.Rdata
+#Data in my desktop: ~/data/gpp_gmd/out_eval_FULL.Rdata
+load("~/data/gpp_gmd/out_eval_FULL.Rdata")
+print(out_eval_FULL$gpp$fluxnet2015$data$meandf)
+summary(out_eval_FULL$gpp$fluxnet2015$data$meandf)
+gpp_flux_df <- as.data.frame(out_eval_FULL$gpp$fluxnet2015$data$meandf)
+head(gpp_flux_df)
+
+library(ingestr)
+siteinfo_fluxnet2015 <- as.data.frame(siteinfo_fluxnet2015)
+siteinfo_df <- siteinfo_fluxnet2015[,c("sitename","lon","lat","elv","plant_functional_type")]
+head(siteinfo_df)
+#merged with pred and obs gpp above
+gpp_flux_site <- merge(gpp_flux_df,siteinfo_df,by=c("sitename"),all.x=TRUE)
+#structure it
+gpp_flux_site <- gpp_flux_site[,c(4,5,6,7,1,2,3)]
+names(gpp_flux_site) <- c("lon","lat","z","pft","sitename","obs_GPP","GPP_site_forcing")
+head(gpp_flux_site)
+
+#3a. gwr
+for (i in c(1:nrow(gpp_flux_site))){
+  #gpp from nimpl
+  gpp_global <- na.omit(gpp_df)
+  gpp_part <- subset(gpp_global,lon>(gpp_flux_site[i,1]-a)&lon<(gpp_flux_site[i,1]+a)&
+                       lat>(gpp_flux_site[i,2]-a)&lat<(gpp_flux_site[i,2]+a))
+  coordinates(gpp_part) <- c("lon","lat")
+  gridded(gpp_part) <- TRUE
+  
+  gpp_coord <- gpp_flux_site[i,1:3] # select lon, lat, z
+  coordinates(gpp_coord) <- c("lon","lat")
+  gpp_flux_site$nimpl_gpp_gwr[i] <- (gwr(gpp ~ z, gpp_part, bandwidth = 1.06, fit.points =gpp_coord,predictions=TRUE))$SDF$pred
+  #GPP from gmd
+  gpp_global <- na.omit(gpp_gmd)
+  gpp_part <- subset(gpp_global,lon>(gpp_flux_site[i,1]-a)&lon<(gpp_flux_site[i,1]+a)&
+                       lat>(gpp_flux_site[i,2]-a)&lat<(gpp_flux_site[i,2]+a))
+  coordinates(gpp_part) <- c("lon","lat")
+  gridded(gpp_part) <- TRUE
+  
+  gpp_coord <- gpp_flux_site[i,1:3] # select lon, lat, z
+  coordinates(gpp_coord) <- c("lon","lat")
+  gpp_flux_site$gmd_gpp_gwr[i] <- (gwr(gpp ~ z, gpp_part, bandwidth = 1.06, fit.points =gpp_coord,predictions=TRUE))$SDF$pred
+}
+
+
+#3b.directly method
+#(1) from nimpl
+gpp_global <- na.omit(gpp_df)
+coordinates(gpp_global) <- ~lon+lat 
+gridded(gpp_global) <- TRUE
+rgpp_global <- raster(gpp_global, "gpp") 
+sp_sites <- SpatialPoints(gpp_flux_site[,c("lon","lat","z")]) # only select lon and lat
+
+gpp_flux_site <- extract(rgpp_global, sp_sites, sp = TRUE) %>% as_tibble() %>% 
+  right_join(gpp_flux_site, by = c("lon", "lat","z")) %>% 
+  dplyr::rename( nimpl_gpp_directly = gpp)
+
+gpp_flux_site <- as.data.frame(gpp_flux_site)
+
+#(2) from gmd
+gpp_global <- na.omit(gpp_gmd)
+coordinates(gpp_global) <- ~lon+lat 
+gridded(gpp_global) <- TRUE
+rgpp_global <- raster(gpp_global, "gpp") 
+sp_sites <- SpatialPoints(gpp_flux_site[,c("lon","lat","z")]) # only select lon and lat
+
+gpp_flux_site <- extract(rgpp_global, sp_sites, sp = TRUE) %>% as_tibble() %>% 
+  right_join(gpp_flux_site, by = c("lon", "lat","z")) %>% 
+  dplyr::rename( gmd_gpp_directly = gpp)
+
+gpp_flux_site <- as.data.frame(gpp_flux_site)
+head(gpp_flux_site)
+
+#re-structure
+gpp_flux_site <- gpp_flux_site[,c(2,3,4,6,7,8,9,10,11,1,5)]
+
+head(gpp_flux_site)
+
+#Comparsion:
+#1. obs. GPP vs. GPP_site_forcing --> No underestimation!
+analyse_modobs2(gpp_flux_site,"obs_GPP","GPP_site_forcing", type = "points")
+
+#2. obs. GPP vs. nimpl_gpp_gwr
+analyse_modobs2(gpp_flux_site,"obs_GPP","nimpl_gpp_gwr", type = "points")
+
+#3. obs. GPP vs. nimpl_gpp_directly
+analyse_modobs2(gpp_flux_site,"obs_GPP","nimpl_gpp_directly", type = "points")
+
+#4. obs. GPP vs. gmd_gpp_gwr
+analyse_modobs2(gpp_flux_site,"obs_GPP","gmd_gpp_gwr", type = "points")
+
+#5. obs. GPP vs. gmd_gpp_directly
+analyse_modobs2(gpp_flux_site,"obs_GPP","gmd_gpp_directly", type = "points")
+
+
+#######add pft
+#add pft data derived from orginal data provided from Sara Vicca
+Evergreen <- read.csv(file="~/data/NPP_Yunke/NPP_SaraVicca/orig/pft.csv")
+pft_type <- merge(NPP_all,Evergreen,by=c("site"),all.x=TRUE)
+pft_type2 <- pft_type[,c("lon","lat","z","pft")]
+pft_type3 <- unique(pft_type2)
+nonforest <- subset(pft_type3, pft == "Grassland" |pft == "Plantation"|pft == "Cropland")
+
+#we realized that there are only 26 of 347 sites are NOT forest. We filtered it at here, 
+# which makes it easy to merge with our GPP, NPP...sites.
+nonforest[c(22:23),] 
+#we noticed that row 22 and 23 has the same site, but one notified as Cropland another notified as grassland, perhaps from different sources
+#this classfication is really not important, so let's delete one safely (so that it will not cause trouble when merging)
+nonforest <- nonforest[c(1:22,24:26),]
+gpp_site <- merge(gpp_site,nonforest,by=c("lon","lat","z"),all.x=TRUE)
+gpp_nonforest <- subset(gpp_site, pft!="NA")
+dim(gpp_nonforest) # 25 sites are non-forest
+#analyse_modobs2(subset(gpp_nonforest,pred>0),"GPP","pred", type = "points")
+
+
+######construct forest GPP dataset
+gpp_forest <- subset(gpp_site, is.na(pft)==TRUE)
+dim(gpp_forest) #139 sites are forest
+head(gpp_forest)
+
+######1. Forest GPP: nimpl_gpp vs. obs. gpp: we did some some undestimation.
+analyse_modobs2(subset(gpp_forest,nimpl_gpp_gwr>0),"GPP","nimpl_gpp_gwr", type = "points")
+analyse_modobs2(subset(gpp_forest,nimpl_gpp_directly>0),"GPP","nimpl_gpp_directly", type = "points")
+
+######2. Forest GPP: gmd_gpp vs. obs. gpp: we did some some undestimation.
+analyse_modobs2(subset(gpp_forest,gmd_gpp_gwr>0),"GPP","gmd_gpp_gwr", type = "points")
+analyse_modobs2(subset(gpp_forest,gmd_gpp_directly>0),"GPP","gmd_gpp_directly", type = "points")
+
+######3. Forest GPP: gmd_gpp_gwr vs. nimpl_gpp_gwr -> gmd slightly high, but not too much!
+analyse_modobs2(subset(gpp_forest,gmd_gpp_gwr>0),"nimpl_gpp_gwr","gmd_gpp_gwr", type = "points")
+
+#nimpl GPP (c3 only) data was stored in /Users/yunpeng/data/GPP/c3.
+
+
+```

@@ -1,0 +1,104 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+---
+title: "Predict GPP in grassland, and fit NPP/GPP and ANPP/GPP"
+author: "Yunke Peng"
+date: "Dec 7, 2020"
+output: html_document
+---
+
+
+```{r}
+#the work needs to be done in the project!!! "~/rsofun/rsofun.Rproj"
+
+library(dplyr)
+library(ingestr)
+library(ingestr)
+library(tidyverse)  # depends
+library(ncmeta)
+library(viridis)
+library(ggthemes)
+library(LSD)
+library(yardstick)
+library(ggplot2)
+library(RColorBrewer)
+library(gplots)
+library(tidyselect)
+library(extrafont)
+library(rbeni)
+library(raster)
+library(spgwr)
+library(maps)
+library(rworldmap)
+library(cowplot)
+library(spgwr)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library("PerformanceAnalytics")
+library(MuMIn)
+library(rworldmap)
+
+load(file = "/Users/yunpeng/yunkepeng/nimpl_sofun_inputs/grassland/grassland_site_simulation.Rdata")
+
+#for details please see grassland_site_simulation in the same file
+#remove repeated data from keith (that has already been inputted in Cambioli's dataset - about its npp, anpp, bnpp)
+NPP_grassland_final10 <- subset(NPP_grassland_final9,rep_info!="rep" & rep_info!="rep1"& rep_info!="rep3")
+
+summary(NPP_grassland_final10)
+
+dim(subset(NPP_grassland_final10,TNPP_1<weightedgpp_all))
+dim(subset(NPP_grassland_final10,TNPP_1>weightedgpp_all))
+
+#only filter grassland in Mcampioli data
+NPP_grassland_final10$filter2[NPP_grassland_final10$biome_MCampioli == "marsh"] <- "removal2"
+NPP_grassland_final10$filter2[NPP_grassland_final10$biome_MCampioli == "savannah"] <- "removal2"
+
+NPP_grassland_final11 <- subset(NPP_grassland_final10,is.na(filter2)==TRUE)
+
+dim(subset(NPP_grassland_final11,TNPP_1<weightedgpp_all))
+dim(subset(NPP_grassland_final11,TNPP_1>weightedgpp_all))
+#20% points are outlier 1
+outlier1 <- subset(NPP_grassland_final11,TNPP_1>weightedgpp_all)
+library(rworldmap)
+newmap <- getMap(resolution = "low")
+plot(newmap, xlim = c(-180, 180), ylim = c(-75, 75), asp = 1)
+points(outlier1$lon,outlier1$lat, col="red", pch=16,cex=1)
+title("Outlier plots where measured NPP > predicted GPP")
+
+hist(outlier1$BNPP_1/outlier1$TNPP_1,main="bnpp/npp in those outlier plots")
+
+#12% points are outlier 2
+outlier2 <- subset(NPP_grassland_final11,TNPP_1/weightedgpp_all<0.2)
+library(rworldmap)
+newmap <- getMap(resolution = "low")
+plot(newmap, xlim = c(-180, 180), ylim = c(-75, 75), asp = 1)
+points(outlier2$lon,outlier2$lat, col="red", pch=16,cex=1)
+title("Outlier plots where measured NPP / predicted GPP < 0.2")
+
+hist(outlier2$BNPP_1/outlier2$TNPP_1,main="bnpp/npp in those outlier plots")
+
+#make models to have a look --> CUE = 0.40462 --> reasonable
+summary(lmer((TNPP_1)~-1+(weightedgpp_all)+(1|site),data=NPP_grassland_final11))
+r.squaredGLMM(lmer((TNPP_1)~-1+(weightedgpp_all)+(1|site),data=NPP_grassland_final11))
+
+#summary(lmer((TNPP_1)~-1+(weightedgpp_all)+(1|site_xyz),data=NPP_grassland_final11))
+
+summary(lmer(log((ANPP_2/TNPP_1)/(1-(ANPP_2/TNPP_1)))~Tg+alpha+(1|site),data=NPP_grassland_final11))
+r.squaredGLMM(lmer(log((ANPP_2/TNPP_1)/(1-(ANPP_2/TNPP_1)))~Tg+alpha+(1|site),data=NPP_grassland_final11))
+
+#summary(lmer(log((ANPP_2/TNPP_1)/(1-(ANPP_2/TNPP_1)))~Tg+alpha+(1|site_xyz),data=NPP_grassland_final11))
+
+#aaa <- subset(NPP_grassland_final11,ANPP_2>0&TNPP_1>0&Tg>0&alpha>0)
+
+summary(NPP_grassland_final11$CN_root_final)
+
+
+
+```
+
